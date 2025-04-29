@@ -1,9 +1,10 @@
 import logging
+from datetime import datetime, timedelta
 from http import HTTPStatus
 
 import httpx
 from bs4 import BeautifulSoup
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Body, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
@@ -65,15 +66,42 @@ headers = {
 }
 
 
+def create_access_token(data: dict, expires_delta: timedelta | None = None):
+    """Cria um token JWT.
+
+    Args:
+        data (dict): dados a serem codificados no token
+        expires_delta (timedelta | None, optional): tempo de expiração do token.
+            Defaults to None.
+
+    Returns:
+        str: token JWT
+    """
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=60))
+    to_encode.update({'exp': expire})
+    encoded_jwt = jwt.encode(to_encode, WP_JWT_SECRET_KEY, algorithm='HS256')
+    return encoded_jwt
+
+
 async def verify_token(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ):
-    """Verifica se o token JWT é válido"""
+    """Verifica se o token JWT é válido.
+    Args:
+        credentials (HTTPAuthorizationCredentials, optional):
+            credenciais do token JWT. Defaults to Depends(security).
+
+    Raises:
+        HTTPException: se o token JWT for inválido ou expirado
+
+    Returns:
+        dict: payload do token JWT
+    """
+    logger.info('Verificando token JWT')
     try:
         token = credentials.credentials
-        payload = jwt.decode(
-            token, WP_JWT_SECRET_KEY, algorithms=['HS256']
-        )
+        payload = jwt.decode(token, WP_JWT_SECRET_KEY, algorithms=['HS256'])
         logger.info('Token JWT verificado com sucesso')
         return payload
     except JWTError as e:
@@ -183,12 +211,52 @@ async def fetch_wp_data():
 # Rota para obter os dados dos posts
 @app.get('/posts', response_model=list[PostResponse])
 async def get_posts(_: dict = Depends(verify_token)):
+    """Rota para obter os dados dos posts.
+
+    Args:
+        _ (dict, optional): payload do token JWT. Defaults to Depends(verify_token).
+
+    Returns:
+        list[PostResponse]: lista de posts
+    """
     logger.info('Requisição recebida na rota /posts')
-    return await fetch_wp_data()
+    try:
+        posts = await fetch_wp_data()
+        logger.info('Dados dos posts retornados com sucesso')
+        return posts
+    except HTTPException as e:
+        logger.error(f'Erro ao buscar dados da API WordPress: {str(e)}')
+        raise HTTPException(
+            status_code=e.status_code,
+            detail=f'Erro ao buscar dados da API WordPress: {e.detail}',
+        )
 
 
 # Rota raiz para verificar se a API está funcionando
 @app.get('/')
 async def root():
+    """Rota raiz para verificar se a API está funcionando.
+
+    Returns:
+        dict: mensagem de status da API
+    """
     logger.info('Verificação de status da API')
     return {'message': 'API Blog está funcionando!'}
+
+
+# Rota para obter o token JWT da API com as credenciais do usuário
+@app.post('/auth')
+async def login(username: str = Body(...), password: str = Body(...)):
+    logger.info(f'Tentativa de login para o usuário: {username}')
+    # Verifica as credenciais
+    if username != WP_LOGIN or password != WP_PASSWORD:
+        logger.warning('Credenciais inválidas')
+        raise HTTPException(
+            status_code=HTTPStatus.UNAUTHORIZED,
+            detail='Credenciais inválidas',
+        )
+
+    # Gera o token
+    access_token = create_access_token(data={'sub': username})
+    logger.info(f'Token JWT gerado com sucesso para o usuário: {username}')
+    return {'access_token': access_token, 'token_type': 'bearer'}
