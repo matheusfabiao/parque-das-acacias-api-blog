@@ -70,23 +70,33 @@ async def get_jwt_token_from_wp():
                 detail=f'Erro na obtenção do token JWT: {e}',
             )
 
-async def verify_token(
+# verificar se o token obtido da função get_jwt_token_from_wp é válido
+def verify_token(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ):
-    """Verifica se o token JWT é válido"""
+    """Verifica se o token JWT é válido.
+
+    Args:
+        credentials (HTTPAuthorizationCredentials):
+            credenciais de autenticação
+
+    Returns:
+        dict: token JWT
+    """
+    logger.info('Verificando token JWT')
     try:
-        token = credentials.credentials
         payload = jwt.decode(
-            token, WP_JWT_SECRET_KEY, algorithms=['HS256']
+            credentials.credentials,
+            WP_JWT_SECRET_KEY,
+            algorithms=['HS256'],
         )
-        logger.info('Token JWT verificado com sucesso')
-        return {"payload": payload, "token": token}
+        logger.info('Token JWT válido')
+        return {'token': credentials.credentials, 'payload': payload}
     except JWTError as e:
         logger.error(f'Erro na verificação do token JWT: {str(e)}')
         raise HTTPException(
             status_code=HTTPStatus.UNAUTHORIZED,
-            detail='Token inválido ou expirado',
-            headers={'WWW-Authenticate': 'Bearer'},
+            detail=f'Erro na verificação do token JWT: {e}',
         )
         
 
@@ -216,3 +226,13 @@ async def get_posts(auth_data: dict = Depends(verify_token)):
 async def root():
     logger.info('Verificação de status da API')
     return {'message': 'API Blog está funcionando!'}
+
+@app.post('/auth')
+async def auth():
+    """Obtém um token JWT da API WordPress.
+
+    Returns:
+        dict: token JWT
+    """
+    token = await get_jwt_token_from_wp()
+    return {'token': token}
