@@ -1,10 +1,9 @@
 import logging
-from datetime import datetime, timedelta
 from http import HTTPStatus
 
 import httpx
 from bs4 import BeautifulSoup
-from fastapi import Body, Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
@@ -42,68 +41,46 @@ app.add_middleware(
 
 # Variáveis de ambiente para WordPress
 WP_URL = settings.WP_URL
-WP_JWT_TOKEN = settings.WP_JWT_TOKEN
 WP_JWT_SECRET_KEY = settings.WP_JWT_SECRET_KEY
 WP_LOGIN = settings.WP_LOGIN
 WP_PASSWORD = settings.WP_PASSWORD
 
-# Verifica se as variáveis de ambiente foram definidas
-if not WP_URL or not WP_JWT_TOKEN:
-    logger.error('Variáveis de ambiente WP_URL e WP_JWT_TOKEN não definidas')
-    raise ValueError(
-        'As variáveis de ambiente WP_URL e WP_JWT_TOKEN devem ser definidas.'
-    )
 
-# Verifica se a variável de ambiente WP_URL termina com uma barra
-if not WP_URL.endswith('/'):
-    WP_URL += '/'
-    logger.info(f'URL do WordPress ajustada para: {WP_URL}')
-
-# Define os cabeçalhos para a autenticação JWT
-headers = {
-    'Authorization': f'Bearer {WP_JWT_TOKEN}',
-    'Content-Type': 'application/json',
-}
-
-
-def create_access_token(data: dict, expires_delta: timedelta | None = None):
-    """Cria um token JWT.
-
-    Args:
-        data (dict): dados a serem codificados no token
-        expires_delta (timedelta | None, optional): tempo de expiração do token.
-            Defaults to None.
+async def get_jwt_token_from_wp():
+    """Obtém um token JWT da API WordPress.
 
     Returns:
         str: token JWT
     """
-    to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=60))
-    to_encode.update({'exp': expire})
-    encoded_jwt = jwt.encode(to_encode, WP_JWT_SECRET_KEY, algorithm='HS256')
-    return encoded_jwt
-
+    logger.info('Obtendo token JWT da API WordPress')
+    async with httpx.AsyncClient() as client:
+        # Requisição POST para obter o token JWT
+        try:
+            response = await client.post(
+                f'{WP_URL}/wp-json/jwt-auth/v1/token',
+                json={'username': WP_LOGIN, 'password': WP_PASSWORD},
+            )
+            response.raise_for_status()
+            logger.info('Token JWT obtido com sucesso')
+            return response.json()['token']
+        except httpx.HTTPError as e:
+            logger.error(f'Erro na obtenção do token JWT: {str(e)}')
+            raise HTTPException(
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                detail=f'Erro na obtenção do token JWT: {e}',
+            )
 
 async def verify_token(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ):
-    """Verifica se o token JWT é válido.
-    Args:
-        credentials (HTTPAuthorizationCredentials, optional):
-            credenciais do token JWT. Defaults to Depends(security).
-
-    Raises:
-        HTTPException: se o token JWT for inválido ou expirado
-
-    Returns:
-        dict: payload do token JWT
-    """
-    logger.info('Verificando token JWT')
+    """Verifica se o token JWT é válido"""
     try:
         token = credentials.credentials
-        payload = jwt.decode(token, WP_JWT_SECRET_KEY, algorithms=['HS256'])
+        payload = jwt.decode(
+            token, WP_JWT_SECRET_KEY, algorithms=['HS256']
+        )
         logger.info('Token JWT verificado com sucesso')
-        return payload
+        return {"payload": payload, "token": token}
     except JWTError as e:
         logger.error(f'Erro na verificação do token JWT: {str(e)}')
         raise HTTPException(
@@ -111,6 +88,18 @@ async def verify_token(
             detail='Token inválido ou expirado',
             headers={'WWW-Authenticate': 'Bearer'},
         )
+        
+
+def get_headers(token: str = Depends(get_jwt_token_from_wp)):
+    """Retorna os headers para a requisição.
+
+    Returns:
+        dict: headers
+    """
+    return {
+        'Authorization': f'Bearer {token}',
+        'Content-Type': 'application/json',
+    }
 
 
 # Função para remover tags HTML do resumo
@@ -127,7 +116,7 @@ def clean_html(html_content):
     return soup.get_text()
 
 
-async def get_media_url(post_data, client):
+async def get_media_url(post_data, client, token: str = Depends(get_jwt_token_from_wp)):
     """Pega a URL da imagem destacada do post.
 
     Returns:
@@ -136,7 +125,7 @@ async def get_media_url(post_data, client):
     logger.info(f'Buscando mídia para o post ID: {post_data["id"]}')
     media_response = await client.get(
         f'{WP_URL}/wp-json/wp/v2/media/{post_data["featured_media"]}',
-        headers=headers,
+        headers=get_headers(token),
         params={'_fields': 'guid.rendered'},  # URL da imagem
     )
     if media_response.status_code == HTTPStatus.OK:
@@ -154,14 +143,19 @@ async def get_media_url(post_data, client):
 
 
 # Função para buscar dados da API WordPress
-async def fetch_wp_data():
+async def fetch_wp_data(token: str = Depends(get_jwt_token_from_wp)):
+    """Busca dados da API WordPress.
+
+    Returns:
+        list: lista de posts
+    """
     try:
         logger.info('Iniciando busca de posts no WordPress')
         async with httpx.AsyncClient() as client:
             # Requisição GET para obter os dados dos posts
             response = await client.get(
                 f'{WP_URL}/wp-json/wp/v2/posts',
-                headers=headers,
+                headers=get_headers(token),
                 params={
                     'per_page': 3,  # Limita a 3 posts
                     '_fields': 'id,link,title,excerpt,featured_media',  # Otimiza a resposta
@@ -193,7 +187,7 @@ async def fetch_wp_data():
                 # Se existir imagem destacada, busca a URL completa
                 if post_data['featured_media']:
                     # Requisição GET para obter os dados da imagem
-                    post_data = await get_media_url(post_data, client)
+                    post_data = await get_media_url(post_data, client, token)
 
                 formatted_posts.append(post_data)
 
@@ -210,53 +204,15 @@ async def fetch_wp_data():
 
 # Rota para obter os dados dos posts
 @app.get('/posts', response_model=list[PostResponse])
-async def get_posts(_: dict = Depends(verify_token)):
-    """Rota para obter os dados dos posts.
-
-    Args:
-        _ (dict, optional): payload do token JWT. Defaults to Depends(verify_token).
-
-    Returns:
-        list[PostResponse]: lista de posts
-    """
+async def get_posts(auth_data: dict = Depends(verify_token)):
     logger.info('Requisição recebida na rota /posts')
-    try:
-        posts = await fetch_wp_data()
-        logger.info('Dados dos posts retornados com sucesso')
-        return posts
-    except HTTPException as e:
-        logger.error(f'Erro ao buscar dados da API WordPress: {str(e)}')
-        raise HTTPException(
-            status_code=e.status_code,
-            detail=f'Erro ao buscar dados da API WordPress: {e.detail}',
-        )
+    token = auth_data['token']
+    # Retorna os dados dos posts em formato JSON com o token JWT no response
+    return await fetch_wp_data(token)
 
 
 # Rota raiz para verificar se a API está funcionando
 @app.get('/')
 async def root():
-    """Rota raiz para verificar se a API está funcionando.
-
-    Returns:
-        dict: mensagem de status da API
-    """
     logger.info('Verificação de status da API')
     return {'message': 'API Blog está funcionando!'}
-
-
-# Rota para obter o token JWT da API com as credenciais do usuário
-@app.post('/auth')
-async def login(username: str = Body(...), password: str = Body(...)):
-    logger.info(f'Tentativa de login para o usuário: {username}')
-    # Verifica as credenciais
-    if username != WP_LOGIN or password != WP_PASSWORD:
-        logger.warning('Credenciais inválidas')
-        raise HTTPException(
-            status_code=HTTPStatus.UNAUTHORIZED,
-            detail='Credenciais inválidas',
-        )
-
-    # Gera o token
-    access_token = create_access_token(data={'sub': username})
-    logger.info(f'Token JWT gerado com sucesso para o usuário: {username}')
-    return {'access_token': access_token, 'token_type': 'bearer'}

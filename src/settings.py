@@ -15,9 +15,7 @@ class Settings(BaseSettings):
         env_file_encoding='utf-8',
         extra='ignore',
     )
-    # WP_URL e WP_JWT_TOKEN devem ser definidos no arquivo .env
     WP_URL: str
-    WP_JWT_TOKEN: str
     WP_JWT_SECRET_KEY: str
     WP_LOGIN: str
     WP_PASSWORD: str
